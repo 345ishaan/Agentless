@@ -183,3 +183,6 @@ results/
 
 # Jupyter Notebooks
 *.ipynb
+
+#pycache
+__pycache__/
