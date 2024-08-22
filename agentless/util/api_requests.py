@@ -7,8 +7,6 @@ import anthropic
 import tiktoken
 import google.generativeai as genai
 
-
-
 def num_tokens_from_messages(message, model="gpt-3.5-turbo-0301"):
     """Returns the number of tokens used by a list of messages."""
     try:
@@ -58,11 +56,11 @@ def handler(signum, frame):
     raise Exception("end of time")
 
 
-def request_chatgpt_engine(config, logger, base_url=None, max_retries=40, timeout=100):
+def request_chatgpt_engine(config, logger, api_key=None, base_url=None, max_retries=40, timeout=100):
     ret = None
     retries = 0
 
-    client = openai.OpenAI(base_url=base_url)
+    client = openai.OpenAI(api_key=api_key, base_url=base_url)
 
     while ret is None and retries < max_retries:
         try:

@@ -186,3 +186,5 @@ results/
 
 #pycache
 __pycache__/
+# Mac
+.DS_Store
