@@ -241,5 +241,57 @@ def main(instance_id: str):
             print(dependency_graph_builder.dependency_graph.get(file, "No dependencies found"))
     
 if __name__ == "__main__":
-    instance_id = 'sympy__sympy-13647'
-    main(instance_id)
+    # instance_id = 'sympy__sympy-13647'
+    # main(instance_id)
+
+    mock_codebase = {
+        "sympy/sympy.matrices/tests/test_commonmatrix.py": """
+from sympy import (
+    Abs, Add, E, Float, I, Integer, Max, Min, N, Poly, Pow, PurePoly, Rational,
+    S, Symbol, cos, exp, oo, pi, signsimp, simplify, sin, sqrt, symbols,
+    sympify, trigsimp, tan, sstr, diff)
+from sympy.matrices.common import (ShapeError, MatrixError, NonSquareMatrixError,
+    _MinimalMatrix, MatrixShaping, MatrixProperties, MatrixOperations, MatrixArithmetic,
+    MatrixSpecial)
+from sympy.matrices.matrices import (DeferredVector, MatrixDeterminant,
+    MatrixReductions, MatrixSubspaces, MatrixEigen, MatrixCalculus)
+from sympy.matrices import (
+    GramSchmidt, ImmutableMatrix, ImmutableSparseMatrix, Matrix,
+    SparseMatrix, casoratian, diag, eye, hessian,
+    matrix_multiply_elementwise, ones, randMatrix, rot_axis1, rot_axis2,
+    rot_axis3, wronskian, zeros, MutableDenseMatrix, ImmutableDenseMatrix)
+from sympy.core.compatibility import long, iterable, range
+from sympy.utilities.iterables import flatten, capture
+from sympy.utilities.pytest import raises, XFAIL, slow, skip
+from sympy.solvers import solve
+from sympy.assumptions import Q
+
+from sympy.abc import a, b, c, d, x, y, z"
+""",
+    "sympy/sympy/matrices/common.py": """
+from __future__ import print_function, division
+
+import collections
+from sympy.core.add import Add
+from sympy.core.basic import Basic, Atom
+from sympy.core.expr import Expr
+from sympy.core.symbol import Symbol
+from sympy.core.function import count_ops
+from sympy.core.singleton import S
+from sympy.core.sympify import sympify
+from sympy.core.compatibility import is_sequence, default_sort_key, range, \
+    NotIterable
+
+from sympy.simplify import simplify as _simplify, signsimp, nsimplify
+from sympy.utilities.iterables import flatten
+from sympy.functions import Abs
+from sympy.core.compatibility import reduce, as_int, string_types
+from sympy.assumptions.refine import refine
+from sympy.core.decorators import call_highest_priority
+
+from types import FunctionType"""
+
+    }
+    dependency_graph = DependencyGraphBuilder(mock_codebase)
+    dependency_graph.build_complete_dependency_graph()
+    print(dependency_graph.dependency_graph)
