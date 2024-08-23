@@ -593,37 +593,52 @@ class RepoMap:
         return '\n'.join(lines[start:end])
     
     def is_imported(self, rel_file_path, tag, tag_names):
+
         assert tag.kind == "import"
         source_rel_path = tag.rel_fname
         target_rel_path = rel_file_path
         import_statement = tag.name
-        # if "core/main.py" in source_rel_path and "openhands.controller" in import_statement:
-        #     print(source_rel_path, target_rel_path, import_statement)
-        #     import pdb
-        #     pdb.set_trace()
         
+
         # Calculate the relative path from source to target
         relative_path = os.path.relpath(os.path.dirname(target_rel_path), os.path.dirname(source_rel_path))
         relative_parts = relative_path.split(os.sep)
-        
+
         # Remove '..' and adjust the path
         while '..' in relative_parts:
             idx = relative_parts.index('..')
             if idx > 0:
                 relative_parts.pop(idx-1)
             relative_parts.pop(idx)
-        
+
         # Append the target filename to the relative path
         relative_parts.append(os.path.splitext(os.path.basename(target_rel_path))[0])
-        
-        
+
+        def check_partial_match(module_parts):
+            # if "core/main.py" in source_rel_path and "openhands.controller" in import_statement:
+            #     print(source_rel_path, target_rel_path, import_statement)
+            #     import pdb
+            #     pdb.set_trace()
+            first_match_index = -1
+            for i in range(len(module_parts)):
+                if module_parts[i] == relative_parts[0]:
+                    first_match_index = i
+                    break
+            if first_match_index == -1:
+                return False
+            match_len = 0
+            for i in range(first_match_index, len(module_parts)):
+
+                if module_parts[i] != relative_parts[match_len]:
+                    return False
+                match_len += 1
+            return True
         # Handle "import" statements
         if import_statement.startswith("import "):
             module = import_statement.split()[1]
             module_parts = module.split('.')
-            
-            # Check if the module parts match the relative path
-            return module_parts == relative_parts
+            return check_partial_match(module_parts)
+            # return module_parts == relative_parts
 
         # Handle "from" statements
         elif import_statement.startswith("from "):
@@ -631,9 +646,23 @@ class RepoMap:
             if len(parts) >= 4 and parts[2] == "import":
                 module = parts[1]
                 module_parts = module.split('.')
+                if not check_partial_match(module_parts):
+                # if module_parts != relative_parts:
+                    return False
                 
-                # Check if the module parts match the relative path
-                return module_parts == relative_parts
+                import_items = parts[3:]
+                
+
+                if "*" in import_items:
+                    return True
+                
+                for item in import_items:
+                    if item in tag_names:
+                        return True
+                return False
+
+
+
 
         return False
 
@@ -660,22 +689,22 @@ class RepoMap:
             rel_other_file = self.get_rel_fname(other_file)
             other_tags = self.get_tags(other_file, rel_other_file)
             
-            num_refs = set()
+            num_refs = []
             for tag in other_tags:
                 if tag.kind == "ref" and tag.name in target_names:
-                    references[tag.name].append((other_file, tag.line))
-                    num_refs.add(tag.name)
+                    num_refs.append((tag.name, tag.line))
             if len(num_refs) == 0:
                 continue
             
 
             is_imported = 0
             for _tag in other_tags:
-                if _tag.kind == "import" and self.is_imported(rel_file_path, _tag, num_refs):
+                if _tag.kind == "import" and self.is_imported(rel_file_path, _tag, target_names):
                     is_imported += 1
                     break
             if is_imported:
-                filtered_references[tag.name] = references[tag.name]
+                for _ref in num_refs:
+                    filtered_references[_ref[0]].append((other_file, _ref[1]))
 
         
         ranked_references = []
@@ -756,7 +785,7 @@ if __name__ == "__main__":
             if "exercises/02_functions/functions2.rs" not in str(doc)
         ]
 
-    rm = RepoMap(root=".")
+    rm = RepoMap(root="./playground/OpenDevin_OpenDevin")
     # print("Chat files: ", chat_files)
     # print("Other files: ", other_files)
     # repo_map = rm.get_ranked_tags_map(chat_files, other_files)
@@ -764,3 +793,9 @@ if __name__ == "__main__":
     ranked_references = rm.find_references(chat_files[0], other_files)
     with open("ranked_references_output.json", "w") as f:
         json.dump(ranked_references, f)
+
+    for key in ranked_references:
+        print(key)
+        for _ref in ranked_references[key]:
+            print(_ref["name"], _ref["line"])
+        print("*"*100)
