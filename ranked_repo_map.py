@@ -1,4 +1,6 @@
 import colorsys
+import json
+import collections
 import os
 import ast
 import random
@@ -107,13 +109,13 @@ def get_documents(repo_name, lang, return_files=False):
                 continue
             full_path = os.path.join(dirpath, file)
             # ignore folders belonging to tests, legacy
-            if (
-                "test" in full_path
-                or "legacy" in full_path
-                or ".github" in full_path
-                or "mock" in full_path
-            ):
-                continue
+            # if (
+            #     "test" in full_path
+            #     or "legacy" in full_path
+            #     or ".github" in full_path
+            #     or "mock" in full_path
+            # ):
+            #     continue
             valid_files.append(Path(full_path))
 
     if return_files:
@@ -228,21 +230,21 @@ class RepoMap:
         file_mtime = self.get_mtime(fname)
         if file_mtime is None:
             return []
-
+        
         cache_key = fname
-        if (
-            cache_key in self.TAGS_CACHE
-            and self.TAGS_CACHE[cache_key]["mtime"] == file_mtime
-        ):
-            return self.TAGS_CACHE[cache_key]["data"]
+        # if (
+        #     cache_key in self.TAGS_CACHE
+        #     and self.TAGS_CACHE[cache_key]["mtime"] == file_mtime
+        # ):
+        #     return self.TAGS_CACHE[cache_key]["data"]
 
         # miss!
 
         data = list(self.get_tags_raw(fname, rel_fname))
 
         # Update the cache
-        self.TAGS_CACHE[cache_key] = {"mtime": file_mtime, "data": data}
-        self.save_tags_cache()
+        # self.TAGS_CACHE[cache_key] = {"mtime": file_mtime, "data": data}
+        # self.save_tags_cache()
         return data
 
     def get_tags_raw(self, fname, rel_fname):
@@ -275,11 +277,15 @@ class RepoMap:
         captures = list(captures)
 
         saw = set()
+
         for node, tag in captures:
+            
             if tag.startswith("name.definition."):
                 kind = "def"
             elif tag.startswith("name.reference."):
                 kind = "ref"
+            elif node.type == "import_statement" or node.type == "import_from_statement":
+                kind = "import"
             else:
                 continue
 
@@ -586,6 +592,52 @@ class RepoMap:
         end = min(len(lines), line_number + 2)
         return '\n'.join(lines[start:end])
     
+    def is_imported(self, rel_file_path, tag, tag_names):
+        assert tag.kind == "import"
+        source_rel_path = tag.rel_fname
+        target_rel_path = rel_file_path
+        import_statement = tag.name
+        # if "core/main.py" in source_rel_path and "openhands.controller" in import_statement:
+        #     print(source_rel_path, target_rel_path, import_statement)
+        #     import pdb
+        #     pdb.set_trace()
+        
+        # Calculate the relative path from source to target
+        relative_path = os.path.relpath(os.path.dirname(target_rel_path), os.path.dirname(source_rel_path))
+        relative_parts = relative_path.split(os.sep)
+        
+        # Remove '..' and adjust the path
+        while '..' in relative_parts:
+            idx = relative_parts.index('..')
+            if idx > 0:
+                relative_parts.pop(idx-1)
+            relative_parts.pop(idx)
+        
+        # Append the target filename to the relative path
+        relative_parts.append(os.path.splitext(os.path.basename(target_rel_path))[0])
+        
+        
+        # Handle "import" statements
+        if import_statement.startswith("import "):
+            module = import_statement.split()[1]
+            module_parts = module.split('.')
+            
+            # Check if the module parts match the relative path
+            return module_parts == relative_parts
+
+        # Handle "from" statements
+        elif import_statement.startswith("from "):
+            parts = import_statement.split()
+            if len(parts) >= 4 and parts[2] == "import":
+                module = parts[1]
+                module_parts = module.split('.')
+                
+                # Check if the module parts match the relative path
+                return module_parts == relative_parts
+
+        return False
+
+        
     def find_references(self, file_path, other_files):
         """
         Find references to functions or class methods from the given file in other repository files.
@@ -597,10 +649,8 @@ class RepoMap:
         # Exclude __init__ and other special methods
         excluded_names = {'__init__', '__str__', '__repr__', '__eq__', '__lt__', '__gt__', '__le__', '__ge__', '__ne__'}
         target_names = set(tag.name for tag in target_tags if tag.kind == "def" and tag.name not in excluded_names)
-        import pdb
-        pdb.set_trace()
         references = defaultdict(list)
-        
+        filtered_references = defaultdict(list)        
 
         # Search for references in other files
         for other_file in other_files:
@@ -610,13 +660,26 @@ class RepoMap:
             rel_other_file = self.get_rel_fname(other_file)
             other_tags = self.get_tags(other_file, rel_other_file)
             
+            num_refs = set()
             for tag in other_tags:
                 if tag.kind == "ref" and tag.name in target_names:
                     references[tag.name].append((other_file, tag.line))
+                    num_refs.add(tag.name)
+            if len(num_refs) == 0:
+                continue
+            
+
+            is_imported = 0
+            for _tag in other_tags:
+                if _tag.kind == "import" and self.is_imported(rel_file_path, _tag, num_refs):
+                    is_imported += 1
+                    break
+            if is_imported:
+                filtered_references[tag.name] = references[tag.name]
 
         
         ranked_references = []
-        for name, refs in references.items():
+        for name, refs in filtered_references.items():
             count = len(refs)
             ranked_references.append((name, count, refs))
 
@@ -625,16 +688,23 @@ class RepoMap:
 
         # the output should be in the following format:
         # name: files : an example showing the way the function is used.
-        import pdb
-        pdb.set_trace()
+        # output a dictionary storing the file name, and then line number and the code block for each reference
+        output_dict = collections.defaultdict(list)
         for name, count, refs in ranked_references:
-            print(f"{name}: {count}")
             for ref in refs:
                 file, line = ref
                 code_block = self.get_code_block(file, line)
-                print(f"{name}: {file} : {code_block}")
+                
 
-        return ranked_references
+                output_dict[str(file)].append(
+                    {
+                        "name": name,
+                        "line": line,
+                        "code_block": code_block
+                    }
+                )
+        
+        return output_dict
 
 
 def find_src_files(directory):
@@ -687,10 +757,10 @@ if __name__ == "__main__":
         ]
 
     rm = RepoMap(root=".")
-    print("Chat files: ", chat_files)
-    print("Other files: ", other_files)
-    repo_map = rm.get_ranked_tags_map(chat_files, other_files)
+    # print("Chat files: ", chat_files)
+    # print("Other files: ", other_files)
+    # repo_map = rm.get_ranked_tags_map(chat_files, other_files)
+    # print(repo_map)
     ranked_references = rm.find_references(chat_files[0], other_files)
-
-    print(repo_map)
-    print(ranked_references)
+    with open("ranked_references_output.json", "w") as f:
+        json.dump(ranked_references, f)
