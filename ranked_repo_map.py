@@ -18,6 +18,13 @@ from pygments.lexers import guess_lexer_for_filename
 from pygments.token import Token
 from pygments.util import ClassNotFound
 from tqdm import tqdm
+from agentless.util.preprocess_data import (
+    correct_file_paths,
+    get_full_file_paths_and_classes_and_functions,
+    get_repo_files,
+    line_wrap_content,
+    show_project_structure,
+)
 
 
 
@@ -144,9 +151,11 @@ class RepoMap:
         io=None,
         repo_content_prefix=None,
         verbose=False,
+        project_structure_cache=None
     ):
         self.io = io
         self.verbose = verbose
+        self.project_structure_cache = project_structure_cache
 
         if not root:
             root = os.getcwd()
@@ -227,10 +236,11 @@ class RepoMap:
 
     def get_tags(self, fname, rel_fname):
         # Check if the file is in the cache and if the modification time has not changed
-        file_mtime = self.get_mtime(fname)
-        if file_mtime is None:
-            return []
-        
+        if not self.project_structure_cache:
+            file_mtime = self.get_mtime(fname)
+            if file_mtime is None:
+                return []
+            
         cache_key = fname
         # if (
         #     cache_key in self.TAGS_CACHE
@@ -265,7 +275,10 @@ class RepoMap:
         fp = open(scm_fname, "r")
         query_scm = fp.read()
 
-        code = open(fname, "r").read()
+        if self.project_structure_cache:
+            code = get_repo_files(self.project_structure_cache, [fname])[fname]
+        else:
+            code = open(fname, "r").read()
         if not code:
             return
         tree = parser.parse(bytes(code, "utf-8"))
@@ -576,8 +589,13 @@ class RepoMap:
         """
         Extract the entire logical block (function/method) containing the reference.
         """
-        with open(file_path, 'r') as file:
-            source = file.read()
+        
+
+        if self.project_structure_cache:
+            source = get_repo_files(self.project_structure_cache, [file_path])[file_path]
+        else:
+            with open(file_path, 'r') as file:
+                source = file.read()
         
         tree = ast.parse(source)
         
@@ -667,7 +685,7 @@ class RepoMap:
         return False
 
         
-    def find_references(self, file_path, other_files):
+    def find_references(self, file_path, other_files, use_target_names=[]):
         """
         Find references to functions or class methods from the given file in other repository files.
         Returns a ranked list of references.
@@ -678,6 +696,13 @@ class RepoMap:
         # Exclude __init__ and other special methods
         excluded_names = {'__init__', '__str__', '__repr__', '__eq__', '__lt__', '__gt__', '__le__', '__ge__', '__ne__'}
         target_names = set(tag.name for tag in target_tags if tag.kind == "def" and tag.name not in excluded_names)
+        if use_target_names:
+            # check all the use_target_names are present in target_names
+            # and use use_target_names as target_names
+            for name in use_target_names:
+                if name not in target_names:
+                    raise ValueError(f"Target name {name} not found in target names")
+            target_names = set(use_target_names)
         references = defaultdict(list)
         filtered_references = defaultdict(list)        
 
@@ -794,8 +819,28 @@ if __name__ == "__main__":
     with open("ranked_references_output.json", "w") as f:
         json.dump(ranked_references, f)
 
-    for key in ranked_references:
-        print(key)
-        for _ref in ranked_references[key]:
-            print(_ref["name"], _ref["line"])
-        print("*"*100)
+    context_prompt = ""
+    pass_count = 0
+    while True:
+        new_context = None
+        for key in ranked_references:
+            if pass_count >= len(ranked_references[key]):
+                continue
+            new_context = ""
+            new_context += f"File Name: {key}:\n"
+            new_context += "Code block:\n"
+            new_context += ranked_references[key][pass_count]["code_block"]
+            pass_count += 1
+            if len(new_context + context_prompt) > 10000:
+                new_context = None
+                break
+            context_prompt += new_context
+            context_prompt += "\n"
+        if new_context is None:
+            break
+    print(context_prompt)
+        
+            
+
+    # use util to form the context:
+    
