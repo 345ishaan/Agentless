@@ -50,6 +50,7 @@ def get_test_loc_recall(data):
         for file in patch_files:
             ranked_references = rm.find_references(file, all_files)
             found_files.extend(list(ranked_references.keys()))
+        print("code patch files", patch_files, "found files", found_files, "test patch files", test_patch_files)
         intersection = set(found_files) & set(test_patch_files)
         recall += len(intersection) / len(test_patch_files)
         count += 1
