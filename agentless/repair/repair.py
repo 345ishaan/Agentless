@@ -142,6 +142,82 @@ Wrap the *SEARCH/REPLACE* edit in blocks ```python...```.
 """
 
 
+
+critique_with_test_cases_prompt = """
+We are currently solving the following issue within our repository. Here is the issue text:
+--- BEGIN ISSUE ---
+{problem_statement}
+--- END ISSUE ---
+
+{repair_relevant_file_instruction}
+--- BEGIN FILE ---
+```
+{content}
+```
+--- END FILE ---
+
+Here is the generated patch for this issue:
+
+{generated_patch}
+
+
+Critique the generated patch for the unittest below and provide feedback on whether the patch is correct or not.
+
+---- TEST CASE BEGIN ----
+```
+{test_case_content}
+```
+---- TEST CASE END ----
+"""
+
+
+repair_prompt_combine_topn_cot_diff_with_critique = """
+We are currently solving the following issue within our repository. Here is the issue text:
+--- BEGIN ISSUE ---
+{problem_statement}
+--- END ISSUE ---
+
+{repair_relevant_file_instruction}
+--- BEGIN FILE ---
+```
+{content}
+```
+--- END FILE ---
+
+Here is an old patch generated for this issue:
+
+{generated_patch}
+
+Use the feedback from the test case to refine the patch.
+
+{feedback}
+
+Please first localize the bug based on the issue statement, and then generate *SEARCH/REPLACE* edits to fix the issue.
+
+Every *SEARCH/REPLACE* edit must use this format:
+1. The file path
+2. The start of search block: <<<<<<< SEARCH
+3. A contiguous chunk of lines to search for in the existing source code
+4. The dividing line: =======
+5. The lines to replace into the source code
+6. The end of the replace block: >>>>>>> REPLACE
+
+Here is an example:
+
+```python
+### mathweb/flask/app.py
+<<<<<<< SEARCH
+from flask import Flask
+=======
+import math
+from flask import Flask
+>>>>>>> REPLACE
+```
+
+Please note that the *SEARCH/REPLACE* edit REQUIRES PROPER INDENTATION. If you would like to add the line '        print(x)', you must fully write that out, with all those spaces before the code!
+Wrap the *SEARCH/REPLACE* edit in blocks ```python...```.
+"""
+
 def _post_process_multifile_repair(
     raw_output: str,
     file_contents: dict[str, str],
@@ -192,6 +268,13 @@ def _post_process_multifile_repair(
     logger.info("\n".join(diff))
     print("\n".join(diff))
     return edited_file, new_content
+
+
+def construct_topn_test_case_content(pred_files, test_case_content):
+    top_n_test_case_content = ""
+    for i in range(len(pred_files)):
+        top_n_test_case_content += f"### {pred_files[i]}\n{test_case_content[pred_files[i]]}\n\n\n"
+    return top_n_test_case_content
 
 
 def construct_topn_file_context(
@@ -409,6 +492,60 @@ def process_loc(loc, args, swe_bench_data, prev_o):
             sample_trajs = []
 
     sample_responses.extend(sample_trajs)
+
+
+    if args.refine_repair:
+        # use generated test cases to refine the patch.
+        top_n_test_case_content = construct_topn_test_case_content(pred_files, loc["generated_test_cases"])
+        for i in range(len(sample_responses)):
+            ret = sample_responses[i]
+            raw_output = ret["response"]
+            test_critique = critique_with_test_cases_prompt.format(
+                problem_statement=problem_statement,
+                repair_relevant_file_instruction=file_instruction,
+                content=topn_content.rstrip(),
+                generated_patch=raw_output,
+                test_case_content=top_n_test_case_content
+            ).strip()
+
+            # get temperature samples
+            refine_model = make_model(
+                model=args.refine_repair_model,
+                logger=logger,
+                backend=args.refine_repair_backend,
+                max_tokens=1024,
+                temperature=0.0,
+                batch_size=1
+            )
+
+            repair_critic_op = refine_model.codegen(test_critique, num_samples=1, system_message="""
+You are principal software engineer at Google. You are deeply proficient with understanding any codebase, solve issues in the codebase
+and analyze whether any code change will be helpful by looking at relevant unittest etc.
+                             """)
+            
+
+            actor_model = make_model(
+                model=args.model,
+                logger=logger,
+                backend=args.backend,
+                max_tokens=1024,
+                temperature=0.0,
+                batch_size=1
+            )
+
+            message_with_test_critique = repair_prompt_combine_topn_cot_diff_with_critique.format(
+                repair_relevant_file_instruction=file_instruction,
+                problem_statement=problem_statement,
+                content=topn_content.rstrip(),
+                feedback=repair_critic_op["response"],
+                generated_patch=raw_output,
+            ).strip()
+
+            sample_responses[i] = actor_model.codegen(message_with_test_critique, num_samples=1, system_message="""
+You are principal software engineer at Google. You are deeply proficient with understanding any codebase, solve issues in the codebase
+and generate code change to fix the issue.
+                             """)
+            
 
     count = 0
     while count < args.max_samples:
@@ -674,6 +811,19 @@ def main():
     parser.add_argument("--top_n", type=int, default=1)
     parser.add_argument("--loc_interval", action="store_true")
     parser.add_argument("--context_window", type=int, default=10)
+    parser.add_argument("--refine_repair", action="store_true")
+    parser.add_argument("--no_refine_valid", action="store_false")
+
+    parser.add_argument(
+        "--refine_repair_model",
+        type=str,
+        default="claude-3-5-sonnet-20240620",
+        choices=["gpt-4o-2024-05-13", "gpt-4o-mini","deepseek-coder", "gpt-4o-mini-2024-07-18", "claude-3-5-sonnet-20240620", "gemini-1.5-flash"],
+    )
+    parser.add_argument(
+        "--refine_repair_backend", type=str, default="anthropic", choices=["openai", "deepseek", "anthropic", "gemini"]
+    )
+
     parser.add_argument(
         "--stop_at_n_unique_valid_samples",
         type=int,
