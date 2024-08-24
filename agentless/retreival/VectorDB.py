@@ -1,6 +1,6 @@
 import hashlib
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
@@ -18,11 +18,12 @@ import os
 from agentless.retreival.TextChunker.count_tokens import count_tokens
 from agentless.retreival.TextChunker.Chunker import CodeChunker
 from agentless.retreival.TextChunker.Chunker import ChunkDictionary
+import logging
+from agentless.retreival.config import EMBEDDINGS_DIR
 
 
-EMBEDDINGS_DIR = Path(__file__).parent / "embeddings"
-if not EMBEDDINGS_DIR.exists():
-    EMBEDDINGS_DIR.mkdir(parents=True)
+# Add this near the top of your file, after the imports
+logging.getLogger("qdrant_client").setLevel(logging.WARNING)
 
 
 COST_PER_TOKEN = 0.0000001
@@ -139,11 +140,7 @@ class QdrantDB(VectorDB):
         self.codebase_dict = codebase_dict
         self.regenerate_embeddings = regenerate_embeddings
 
-        # Create the collection if it doesn't exist
-        self.create_collection_if_not_exists()
-        if self.regenerate_embeddings:
-            self.delete_all_points(force=True)
-        self.upload_data_to_db(self.codebase_dict)
+        
 
     def create_collection_if_not_exists(self):
         """
@@ -196,9 +193,9 @@ class QdrantDB(VectorDB):
         
         return {"message": "Data uploaded to Qdrant"}
     
-    def _get_existing_shas(self) -> List[str]:
+    def _get_existing_points(self) -> List[Dict[str, str]]:
         """
-        Get all the file shas that already exist in the vector database.
+        Get all the file shas and file paths that already exist in the vector database.
         """
         try:
             search_result = self.client.search(
@@ -206,7 +203,7 @@ class QdrantDB(VectorDB):
                 query_vector=[0] * self.vector_size,
                 limit=100000
             )
-            return [hit.payload['file_sha'] for hit in search_result]
+            return [{'file_sha': hit.payload['file_sha'], 'file_path': hit.payload['file_path']} for hit in search_result]
         except Exception as e:
             print(f"Error in _get_existing_shas: {type(e).__name__}")
             print(f"Error message: {str(e)}")
@@ -230,21 +227,23 @@ class QdrantDB(VectorDB):
         # Get a dictionary of file shas
         file_shas = get_file_shas(code_files)
 
-        # Get all existing shas from the database
-        existing_shas = set(self._get_existing_shas())
+        # Get all existing points from the database
+        existing_points = self._get_existing_points()
 
-        # Create a set of new file SHAs
-        new_file_shas = set(file_shas.values())
-       
-        # Find the SHAs that don't exist in the database
-        shas_to_add = new_file_shas - existing_shas
+        # Create a set of tuples (file_path, sha) for existing points
+        existing_file_path_sha_pairs = {(point['file_path'], point['file_sha']) for point in existing_points}
 
+        # Create a set of tuples (file_path, sha) for new files
+        new_file_path_sha_pairs = {(file_path, file_shas[file_path]) for file_path in code_files}
+
+        # Find the pairs that don't exist in the database
+        pairs_to_add = new_file_path_sha_pairs - existing_file_path_sha_pairs
 
         # Filter the code_files dictionary
         filtered_files = {
             file_path: content
             for file_path, content in code_files.items()
-            if file_shas[file_path] in shas_to_add
+            if (file_path, file_shas[file_path]) in pairs_to_add
         }
 
         filtered_out = set(code_files.keys()) - set(filtered_files.keys())
@@ -257,7 +256,7 @@ class QdrantDB(VectorDB):
         try:
             response = openai.embeddings.create(
                 input=[content],
-                model="text-embedding-ada-002"
+                model="text-embedding-3-small"
             )
             return response.data[0].embedding
         except Exception as e:
@@ -274,12 +273,10 @@ class QdrantDB(VectorDB):
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_path = cache_dir / f"{self.collection_name}_embeddings.pkl"
         
-        # Load existing embeddings if file exists
-        if cache_path.exists():
+        saved_embeddings = {}
+        if not self.regenerate_embeddings and cache_path.exists():
             with cache_path.open('rb') as f:
                 saved_embeddings = pickle.load(f)
-        else:
-            saved_embeddings = {}
 
         new_chunks = []
         for chunk in chunked_data:
@@ -292,51 +289,59 @@ class QdrantDB(VectorDB):
         print(f"Found {len(chunked_data) - len(new_chunks)} cached embeddings. Generating {len(new_chunks)} new embeddings.")
 
         if new_chunks:
-            batches = []
-            current_batch = []
-            current_batch_tokens = 0
-
-            for chunk in new_chunks:
-                chunk_tokens = count_tokens(chunk['chunk_content'], "text-embedding-ada-002")
-                if chunk_tokens > MAX_TOKENS_PER_CHUNK:
-                    sub_chunks = self._split_large_chunk(chunk, MAX_TOKENS_PER_CHUNK)
-                    batches.extend([[sub_chunk] for sub_chunk in sub_chunks])
-                elif current_batch_tokens + chunk_tokens > MAX_TOKENS_PER_CHUNK:
-                    batches.append(current_batch)
-                    current_batch = [chunk]
-                    current_batch_tokens = chunk_tokens
-                else:
-                    current_batch.append(chunk)
-                    current_batch_tokens += chunk_tokens
-
-            if current_batch:
-                batches.append(current_batch)
-
+            batches = self._prepare_batches(new_chunks, MAX_TOKENS_PER_CHUNK)
             print(f"Embedding {len(new_chunks)} chunks in {len(batches)} batches...")
 
-            for batch in tqdm(batches, desc="Embedding batches"):
-                try:
-                    response = openai.embeddings.create(
-                        input=[chunk['chunk_content'] for chunk in batch],
-                        model="text-embedding-ada-002"
-                    )
-                    new_embeddings = [data.embedding for data in response.data]
-                    
-                    for chunk, embedding in zip(batch, new_embeddings):
+            with ThreadPoolExecutor() as executor:
+                futures = [executor.submit(self._embed_batch, batch) for batch in batches]
+                
+                for future in tqdm(as_completed(futures), total=len(futures), desc="Embedding batches"):
+                    batch_embeddings = future.result()
+                    for chunk, embedding in batch_embeddings:
                         key = chunk['file_path'] + str(chunk['chunk_number'])
                         saved_embeddings[key] = embedding
                         chunk['embedding'] = embedding
-                
-                except Exception as e:
-                    print(f"Error during bulk embedding: {e}")
-                    for chunk in batch:
-                        chunk['embedding'] = None
 
             # Save updated embeddings to pickle file
             with cache_path.open('wb') as f:
                 pickle.dump(saved_embeddings, f)
 
         return chunked_data
+
+    def _prepare_batches(self, chunks: List[Dict[str, Any]], max_tokens: int) -> List[List[Dict[str, Any]]]:
+        batches = []
+        current_batch = []
+        current_batch_tokens = 0
+
+        for chunk in chunks:
+            chunk_tokens = count_tokens(chunk['chunk_content'], "text-embedding-3-small")
+            if chunk_tokens > max_tokens:
+                sub_chunks = self._split_large_chunk(chunk, max_tokens)
+                batches.extend([[sub_chunk] for sub_chunk in sub_chunks])
+            elif current_batch_tokens + chunk_tokens > max_tokens:
+                batches.append(current_batch)
+                current_batch = [chunk]
+                current_batch_tokens = chunk_tokens
+            else:
+                current_batch.append(chunk)
+                current_batch_tokens += chunk_tokens
+
+        if current_batch:
+            batches.append(current_batch)
+
+        return batches
+
+    def _embed_batch(self, batch: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], List[float]]]:
+        try:
+            response = openai.embeddings.create(
+                input=[chunk['chunk_content'] for chunk in batch],
+                model="text-embedding-3-small"
+            )
+            new_embeddings = [data.embedding for data in response.data]
+            return list(zip(batch, new_embeddings))
+        except Exception as e:
+            print(f"Error during bulk embedding: {e}")
+            return [(chunk, None) for chunk in batch]
 
     def _split_large_chunk(self, chunk: Dict[str, Any], max_tokens: int) -> List[Dict[str, Any]]:
         """
@@ -394,7 +399,7 @@ class QdrantDB(VectorDB):
                 for file_path, content in files.items():
                     futures.append(executor.submit(process_file, file_path, content, chunker))
 
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Processing files"):
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Chunking files"):
                 prepared_data.extend([{
                     'file_path': file_path,
                     'file_sha': file_sha,
@@ -425,7 +430,7 @@ class QdrantDB(VectorDB):
                 'chunk_number': data_item['chunk_number'],
             }
             if self.include_chunk_content:
-                payload['chunk_content'] = data_item['chunk_content']
+                payload['chunk_content'] = data_item['chunk_content']   
 
             return models.PointStruct(
                 id=str(uuid.uuid4()),  # Generate a new UUID for each point
@@ -492,14 +497,16 @@ class QdrantDB(VectorDB):
         file_scores = {}
         for hit in search_result:
             file_path = hit.payload.get('file_path')
-            if file_path not in file_scores or hit.score > file_scores[file_path]['score']:
-                file_scores[file_path] = {
-                    'score': hit.score,
-                    'chunk_number': hit.payload.get('chunk_number'),
-                    'file_sha': hit.payload.get('file_sha'),
-                }
-                if self.include_chunk_content:
-                    file_scores[file_path]['chunk_content'] = hit.payload.get('chunk_content')
+            # Only process files that are in the codebase_dict
+            if file_path in self.codebase_dict:
+                if file_path not in file_scores or hit.score > file_scores[file_path]['score']:
+                    file_scores[file_path] = {
+                        'score': hit.score,
+                        'chunk_number': hit.payload.get('chunk_number'),
+                        'file_sha': hit.payload.get('file_sha'),
+                    }
+                    if self.include_chunk_content:
+                        file_scores[file_path]['chunk_content'] = hit.payload.get('chunk_content')
 
         # Sort the results by score and return the top_n
         ranked_results = sorted(
@@ -545,6 +552,11 @@ if __name__ == "__main__":
         mock_codefiles = json.load(f)
 
     vector_ops = QdrantDB("test_collection", mock_codefiles, include_chunk_content=True, regenerate_embeddings=True)
+    # Create the collection if it doesn't exist
+    vector_ops.create_collection_if_not_exists()
+    if vector_ops.regenerate_embeddings:
+        vector_ops.delete_all_points(force=True)
+    vector_ops.upload_data_to_db(vector_ops.codebase_dict)
 
     # Example: Perform a search
     query = "hello world"
