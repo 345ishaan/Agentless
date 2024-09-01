@@ -199,7 +199,7 @@ def localize_instance(
 
 
 def localize(args):
-    swe_bench_data = load_dataset("exploiter345/SWE-bench_Verified_50", split="test")
+    swe_bench_data = load_dataset("princeton-nlp/SWE-bench_Lite", split="test")
     # swe_bench_data = swe_bench_data.filter(lambda x : x["repo"] == "django/django")
     # add support to only iterate over a subset of the dataset
     if args.run_top_n > 0:
@@ -304,11 +304,11 @@ def main():
     parser.add_argument(
         "--reflection_model",
         type=str,
-        default="claude-3-5-sonnet-20240620",
-        choices=["gpt-4o-2024-05-13", "gpt-4o-mini","deepseek-coder", "gpt-4o-mini-2024-07-18", "claude-3-5-sonnet-20240620", "gemini-1.5-flash"],
+        default="claude-3-5-sonnet@20240620",
+        choices=["gpt-4o-2024-05-13", "gpt-4o-mini","deepseek-coder", "gpt-4o-mini-2024-07-18", "claude-3-5-sonnet@20240620", "gemini-1.5-flash"],
     )
     parser.add_argument(
-        "--reflection_backend", type=str, default="anthropic", choices=["openai", "deepseek", "anthropic", "gemini"]
+        "--reflection_backend", type=str, default="anthropic_gcp", choices=["openai", "deepseek", "anthropic_gcp", "gemini", "azure"]
     )
 
     parser.add_argument("--output_folder", type=str, required=True)
@@ -360,7 +360,7 @@ def main():
         choices=["gpt-4o-2024-05-13", "gpt-4o-mini","deepseek-coder", "gpt-4o-mini-2024-07-18", "claude-3-5-sonnet-20240620", "gemini-1.5-flash"],
     )
     parser.add_argument(
-        "--backend", type=str, default="anthropic", choices=["openai", "deepseek", "anthropic", "gemini"]
+        "--backend", type=str, default="anthropic_gcp", choices=["openai", "deepseek", "anthropic_gcp", "gemini", "azure"]
     )
 
     args = parser.parse_args()

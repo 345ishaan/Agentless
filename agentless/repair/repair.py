@@ -656,18 +656,7 @@ def post_process_raw_output(
                 "\ No newline at end of file\n", ""
             )
 
-            try:
-                syntax_success = check_syntax(new_content)
-            except SyntaxError as e:
-                print(f'Error checking syntax: {e}')
-                try:
-                    new_content = fix_syntax_error_diff_files(new_content, content, logger)
-                    print(f"success fixed syntax: {new_content}")
-                    syntax_success = True
-                except DiffPatchError as e:
-                    print(f'Error fixing syntax: {e}')
-                    syntax_success = False
-            
+            syntax_success = check_syntax(new_content)
             lint_success, prev_errors, errors = lint_code(
                 "playground", "test.py", new_content, file_contents[edited_file]
             )
@@ -842,10 +831,10 @@ def main():
         "--model",
         type=str,
         default="gpt-4o-2024-05-13",
-        choices=["gpt-4o-2024-05-13", "deepseek-coder", "gpt-4o-mini-2024-07-18"],
+        choices=["gpt-4o-2024-05-13", "deepseek-coder", "gpt-4o-mini-2024-07-18", "claude-3-5-sonnet@20240620"],
     )
     parser.add_argument(
-        "--backend", type=str, default="openai", choices=["openai", "deepseek"]
+        "--backend", type=str, default="openai", choices=["openai", "deepseek", "azure", "anthropic_gcp"]
     )
     parser.add_argument("--output_folder", type=str, required=True)
     parser.add_argument(
