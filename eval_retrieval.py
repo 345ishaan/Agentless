@@ -17,8 +17,22 @@ import sys
 from collections import defaultdict
 from datasets import load_dataset
 from typing import List
-from agentless.util.preprocess_data import get_repo_files
+from agentless.util.preprocess_data import get_full_file_paths_and_classes_and_functions
 
+
+def get_repo_files(structure, filepaths: list[str]):
+    files, classes, functions = get_full_file_paths_and_classes_and_functions(structure)
+    file_contents = dict()
+    for filepath in filepaths:
+        content = None
+
+        for file_content in files:
+            if file_content[0] == filepath:
+                content = "\n".join(file_content[1])
+                file_contents[filepath] = content
+                break
+
+    return file_contents
 
 def save_jsonl(filepath, data):
     with open(filepath, 'w') as f:
@@ -158,6 +172,8 @@ def get_affected_tags(bug, patch_string, project_file_loc):
     affected_tags = collections.defaultdict(list)
     for file_name, lines in affected_lines.items():
         # parse the file content
+        if file_name not in file_contents:
+            continue
         file_content = file_contents[file_name]
         all_lines = [int(x[0]) for x in lines]
         tags_dict = find_structure_for_lines(file_content, all_lines)
@@ -247,6 +263,8 @@ def compute_tags_pr(swe_bench_data, pred_jsonl_path, project_file_loc, output_fi
     total_precision = 0
     total_recall = 0
     count = 0
+    repo_metrics = defaultdict(lambda: {"total_precision": 0, "total_recall": 0, "count": 0})
+
     for pred in pred_data:
         # if instance id is not in project file loc, then skip
         if not os.path.exists(os.path.join(project_file_loc, pred["instance_id"] + ".json")):
@@ -268,23 +286,48 @@ def compute_tags_pr(swe_bench_data, pred_jsonl_path, project_file_loc, output_fi
         precision = true_positives / len(pred_tags_set) if pred_tags_set else 1.0
         recall = true_positives / len(gt_tags_set) if gt_tags_set else 1.0
 
-        total_precision += precision
-        total_recall += recall
-        count += 1
+        repo_name = pred["instance_id"].split("-")[0]
+        repo_metrics[repo_name]["total_precision"] += precision
+        repo_metrics[repo_name]["total_recall"] += recall
+        repo_metrics[repo_name]["count"] += 1
 
     if output_file is not None:
         save_jsonl(output_file, affected_tags_data)
-    # Compute average precision and recall
-    avg_precision = total_precision / count if count > 0 else 0
-    avg_recall = total_recall / count if count > 0 else 0
-    f1_score = 2 * (avg_precision * avg_recall) / (avg_precision + avg_recall) if (avg_precision + avg_recall) > 0 else 0
+    # Compute average precision, recall, and F1 score for each repo
+    results = {}
+    overall_precision = 0
+    overall_recall = 0
+    overall_count = 0
 
-    return {
-        "precision": avg_precision,
-        "recall": avg_recall,
-        "f1_score": f1_score,
-        "count": count
+    for repo, metrics in repo_metrics.items():
+        count = metrics["count"]
+        avg_precision = metrics["total_precision"] / count if count > 0 else 0
+        avg_recall = metrics["total_recall"] / count if count > 0 else 0
+        f1_score = 2 * (avg_precision * avg_recall) / (avg_precision + avg_recall) if (avg_precision + avg_recall) > 0 else 0
+
+        results[repo] = {
+            "precision": avg_precision,
+            "recall": avg_recall,
+            "f1_score": f1_score,
+            "count": count
+        }
+
+        overall_precision += metrics["total_precision"]
+        overall_recall += metrics["total_recall"]
+        overall_count += count
+
+    # Compute overall metrics
+    overall_avg_precision = overall_precision / overall_count if overall_count > 0 else 0
+    overall_avg_recall = overall_recall / overall_count if overall_count > 0 else 0
+    overall_f1_score = 2 * (overall_avg_precision * overall_avg_recall) / (overall_avg_precision + overall_avg_recall) if (overall_avg_precision + overall_avg_recall) > 0 else 0
+
+    results["overall"] = {
+        "precision": overall_avg_precision,
+        "recall": overall_avg_recall,
+        "f1_score": overall_f1_score,
+        "count": overall_count
     }
+    return results
 
 
 if __name__ == "__main__":
@@ -312,7 +355,8 @@ if __name__ == "__main__":
         assert args.preds_path != ""
         output_file = os.path.join(args.output_dir, "affected_tags.jsonl")
         res = compute_tags_pr(swe_bench_data, args.preds_path, args.project_file_loc, output_file)
-        print(res)
+        with open(os.path.join(args.output_dir, "tag_pr_results.json"), "w") as f:
+            json.dump(res, f)
     else:
         assert args.preds_path != ""    
         avg_recalls, avg_tag_precision, avg_tag_recall, count = get_retrieval_eval_results(swe_bench_data, args.preds_path)
